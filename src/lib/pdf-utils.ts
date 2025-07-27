@@ -92,17 +92,3 @@ export async function processPDFAndGenerateEmbeddings(
     throw new Error("Failed to process PDF and generate embeddings");
   }
 }
-
-// Legacy function for backward compatibility
-export async function extractTextFromPDF(file: File): Promise<string> {
-  console.trace("extractTextFromPDF called with file:", file.name);
-
-  const arrayBuffer = await file.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-
-  // For now, keep the existing pdf-parse implementation
-  // In a real implementation, you'd save the file and use LangChain
-  const pdfParse = require("pdf-parse/index");
-  const data = await pdfParse(buffer);
-  return data.text;
-}
