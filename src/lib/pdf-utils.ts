@@ -48,15 +48,25 @@ async function generateEmbeddings(texts: string[]): Promise<number[][]> {
 }
 
 export async function processPDFAndGenerateEmbeddings(
-  filePath: string
+  input: string | Buffer
 ): Promise<{
   chunks: string[];
   embeddings: number[][];
 }> {
   try {
-    // Load the PDF using LangChain
-    const loader = new PDFLoader(filePath);
-    const docs = await loader.load();
+    let docs;
+
+    if (typeof input === "string") {
+      // Load the PDF using file path (for local development)
+      const loader = new PDFLoader(input);
+      docs = await loader.load();
+    } else {
+      // Load the PDF using buffer (for Vercel deployment)
+      // Convert Buffer to Blob and use it with PDFLoader
+      const blob = new Blob([input], { type: "application/pdf" });
+      const loader = new PDFLoader(blob);
+      docs = await loader.load();
+    }
 
     // Extract text from all pages
     const fullText = docs.map((doc) => doc.pageContent).join("\n");

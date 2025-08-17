@@ -1,11 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase";
-import { processPDFAndGenerateEmbeddings, upload } from "@/lib/pdf-utils";
+import { processPDFAndGenerateEmbeddings } from "@/lib/pdf-utils";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { CharacterTextSplitter } from "@langchain/textsplitters";
 import { Document } from "@langchain/core/documents";
-import path from "path";
-import fs from "fs-extra";
 
 // Initialize Google Generative AI for embeddings
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
@@ -31,6 +29,8 @@ async function generateEmbeddings(texts: string[]): Promise<number[][]> {
 }
 
 export async function POST(request: NextRequest) {
+  let uploadedFilePath: string | null = null;
+
   try {
     const formData = await request.formData();
     const file = formData.get("file") as File;
@@ -58,27 +58,55 @@ export async function POST(request: NextRequest) {
       if (file.type === "application/pdf") {
         fileType = "pdf";
 
-        // Save file to local directory
-        const uploadDir = path.join(process.cwd(), "uploads");
-        await fs.ensureDir(uploadDir);
+        try {
+          // 1. Upload file to Supabase Storage
+          const fileName = `pdf-${Date.now()}-${Math.round(
+            Math.random() * 1e9
+          )}.pdf`;
+          const { data: uploadData, error: uploadError } =
+            await supabaseAdmin.storage
+              .from("documents")
+              .upload(fileName, file, {
+                contentType: "application/pdf",
+                cacheControl: "3600",
+                upsert: false,
+              });
 
-        const fileName = `pdf-${Date.now()}-${Math.round(
-          Math.random() * 1e9
-        )}.pdf`;
-        const filePath = path.join(uploadDir, fileName);
+          if (uploadError) {
+            console.error("Storage upload error:", uploadError);
+            throw new Error("Failed to upload file to storage");
+          }
 
-        const arrayBuffer = await file.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-        await fs.writeFile(filePath, buffer);
+          uploadedFilePath = fileName;
+          console.log("File uploaded to storage:", fileName);
 
-        // Process PDF and generate embeddings using LangChain
-        const result = await processPDFAndGenerateEmbeddings(filePath);
-        chunks = result.chunks;
-        embeddingsArray = result.embeddings;
-        content = chunks.join("\n\n");
+          // 2. Download file from storage to process
+          const { data: downloadData, error: downloadError } =
+            await supabaseAdmin.storage.from("documents").download(fileName);
 
-        // Clean up the temporary file
-        await fs.remove(filePath);
+          if (downloadError) {
+            console.error("Storage download error:", downloadError);
+            throw new Error("Failed to download file from storage");
+          }
+
+          // 3. Convert to Buffer and process
+          const arrayBuffer = await downloadData.arrayBuffer();
+          const buffer = Buffer.from(arrayBuffer);
+
+          // 4. Process PDF and generate embeddings
+          const result = await processPDFAndGenerateEmbeddings(buffer);
+          chunks = result.chunks;
+          embeddingsArray = result.embeddings;
+          content = chunks.join("\n\n");
+        } catch (error) {
+          // Clean up storage if processing fails
+          if (uploadedFilePath) {
+            await supabaseAdmin.storage
+              .from("documents")
+              .remove([uploadedFilePath]);
+          }
+          throw error;
+        }
       } else {
         fileType = "text";
         content = await file.text();
@@ -184,6 +212,26 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // 5. Clean up: Delete file from storage after successful processing
+    if (uploadedFilePath) {
+      try {
+        const { error: deleteError } = await supabaseAdmin.storage
+          .from("documents")
+          .remove([uploadedFilePath]);
+
+        if (deleteError) {
+          console.warn(
+            "Warning: Failed to delete file from storage:",
+            deleteError
+          );
+        } else {
+          console.log("File cleaned up from storage:", uploadedFilePath);
+        }
+      } catch (cleanupError) {
+        console.warn("Warning: Error during storage cleanup:", cleanupError);
+      }
+    }
+
     return NextResponse.json({
       success: true,
       documentId: document.id,
@@ -192,6 +240,22 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error("Upload error:", error);
+
+    // Clean up storage if there was an error
+    if (uploadedFilePath) {
+      try {
+        await supabaseAdmin.storage
+          .from("documents")
+          .remove([uploadedFilePath]);
+        console.log("Cleaned up storage after error:", uploadedFilePath);
+      } catch (cleanupError) {
+        console.warn(
+          "Warning: Failed to cleanup storage after error:",
+          cleanupError
+        );
+      }
+    }
+
     return NextResponse.json(
       { error: "Failed to process upload" },
       { status: 500 }
